@@ -9,14 +9,14 @@ widget "f1" {
   source now = clock every 30s
   source sys = android.system every 1m
   source f1 = cmd("""
-    curl -sf 'https://api.jolpi.ca/ergast/f1/current.json' | jq -c '{season:.MRData.RaceTable.season, races:[.MRData.RaceTable.Races[] | {gp:(.raceName|sub(" Grand Prix.*";"")), city:.Circuit.Location.locality, country:.Circuit.Location.country, round:(.round|tonumber), ts:(.date+"T"+.time|fromdateiso8601), quali:(.Qualifying? | if . then (.date+"T"+.time|fromdateiso8601) else null end), sprint:(.Sprint? | if . then (.date+"T"+.time|fromdateiso8601) else null end)}]}'
+    curl -sf 'https://api.jolpi.ca/ergast/f1/current.json' | jq -c '{season:.MRData.RaceTable.season, races:[.MRData.RaceTable.Races[] | {gp:(.raceName|sub(" Grand Prix";"")), city:.Circuit.Location.locality, country:.Circuit.Location.country, round:(.round|tonumber), ts:(.date+"T"+(.time // "12:00:00Z")|fromdateiso8601), quali:(.Qualifying? | if . then (.date+"T"+(.time // "12:00:00Z")|fromdateiso8601) else null end), sprint:(.Sprint? | if . then (.date+"T"+(.time // "12:00:00Z")|fromdateiso8601) else null end)}]}'
   """) every 1h json
   source res = cmd("""
     off=0; tmp=$(mktemp); n=0
     while [ $n -lt 10 ] && p=$(curl -sf "https://api.jolpi.ca/ergast/f1/current/results.json?limit=100&offset=$off") && [ "$(jq '.MRData.RaceTable.Races|length' <<<"$p")" -gt 0 ]; do
       printf '%s\n' "$p" >> "$tmp"; off=$((off+100)); n=$((n+1))
     done
-    jq -s '[.[].MRData.RaceTable.Races[]] | sort_by(.round|tonumber) | group_by(.round|tonumber) | map(.[0] + {Results: ([.[].Results[]] | sort_by(.position|tonumber))}) | map({round:(.round|tonumber), country:.Circuit.Location.country, name:(.raceName|sub(" Grand Prix.*";"")), top3:[.Results[0:3][] | {p:(.position|tonumber), code:.Driver.code, name:.Driver.familyName, team:.Constructor.name}]}) | {races:.}' "$tmp"
+    jq -s '[.[].MRData.RaceTable.Races[]] | sort_by(.round|tonumber) | group_by(.round|tonumber) | map(.[0] + {Results: ([.[].Results[]] | sort_by(.position|tonumber))}) | . as $all | {races: [$all[] | {round:(.round|tonumber), country:.Circuit.Location.country, name:(.raceName|sub(" Grand Prix";"")), top3:[.Results[0:3][] | {p:(.position|tonumber), code:.Driver.code, name:.Driver.familyName, team:.Constructor.name}]}], latest: ($all[-1] | {round:(.round|tonumber), teams:([.Results[] | {(.Driver.code): .Constructor.name}] | add)})}' "$tmp"
     rm -f "$tmp"
   """) every 30m json timeout 30s
   source drv = cmd("""
@@ -32,9 +32,10 @@ widget "f1" {
   let teams = con.teams ?? []
   let total = f1.season != null ? (races.last() ?? {}).round ?? 0 : 0
   let next = races.find(r => r.ts > now)
-  let done = next == null
+  let done = count(races) > 0 && next == null
   let nextRound = next != null ? next.round : total
   let lastRace = results.last()
+  let latestTeams = res.latest.teams ?? {}
   let flags = {Australia: "🇦🇺", China: "🇨🇳", Japan: "🇯🇵", USA: "🇺🇸", Canada: "🇨🇦", Monaco: "🇲🇨", Spain: "🇪🇸", Austria: "🇦🇹", UK: "🇬🇧", Belgium: "🇧🇪", Hungary: "🇭🇺", Netherlands: "🇳🇱", Italy: "🇮🇹", Azerbaijan: "🇦🇿", Malaysia: "🇲🇾", Singapore: "🇸🇬", Mexico: "🇲🇽", Brazil: "🇧🇷", Qatar: "🇶🇦", UAE: "🇦🇪"}
   let medals = ["🥇", "🥈", "🥉"]
   state view = "calendario"
@@ -51,23 +52,25 @@ widget "f1" {
       align: center
       Text { text: "f1 ${f1.season ?? ""}"; style: muted; width: 60 }
       Spacer { weight: 1 }
-      Text { text: done ? "🏁" : flags[next.country] ?? "🏎️"; fontSize: 22 }
+      Text { text: done ? "🏁" : flags[next.country] ?? "🏎️"; fontSize: 22; width: 30; align: end }
     }
 
-    if done {
+    if count(races) == 0 {
+      Text { text: "…"; style: title }
+    } else if done {
       Text { text: L.seasonOver; style: title }
     } else {
       Text { text: "R${next.round} · ${next.gp}"; style: title; maxLines: 2 }
       Text { text: fmtTime(next.ts, "EEE d MMM · HH:mm"); style: body }
       Text { text: "${L.in} ${fmtDuration(next.ts - now)}"; style: title; color: accent }
 
-      Row {
-        gap: 6
+      Column {
+        gap: 4
         if next.sprint != null && next.sprint > now {
-          Text { text: "sprint ${fmtTime(next.sprint, "d HH:mm")}"; style: label; color: background; background: orange; radius: 4; padding: [6, 2] }
+          Text { text: "sprint ${fmtTime(next.sprint, "EEE HH:mm")}"; style: label; color: background; background: orange; radius: 4; padding: [6, 2]; width: 120; align: center }
         }
         if next.quali != null && next.quali > now {
-          Text { text: "${L.quali} ${fmtTime(next.quali, "d HH:mm")}"; style: label; color: background; background: blue; radius: 4; padding: [6, 2] }
+          Text { text: "${L.quali} ${fmtTime(next.quali, "EEE HH:mm")}"; style: label; color: background; background: blue; radius: 4; padding: [6, 2]; width: 120; align: center }
         }
       }
     }
@@ -89,7 +92,7 @@ widget "f1" {
       align: center
       gap: 8
       Progress { value: nextRound; max: total; color: accent; weight: 1; height: 6 }
-      Text { text: "${nextRound}/${total}"; style: label; color: muted; width: 32; align: end }
+      Text { text: "${nextRound}/${total}"; style: label; color: muted; width: 40; align: end }
     }
   }
 
@@ -107,7 +110,7 @@ widget "f1" {
     }
   }
 
-  component DriverRow(d) {
+  component DriverRow(d, teamsNow = {}) {
     Row {
       align: center
       gap: 8
@@ -117,13 +120,13 @@ widget "f1" {
         gap: 0
         weight: 1
         Text { text: d.name; style: small }
-        Text { text: lower(d.team); style: label; color: muted }
+        Text { text: lower(teamsNow[d.code] ?? d.team); style: label; color: muted }
       }
       Column {
         gap: 0
         width: 56
         Text { text: "${d.pts}"; style: body; bold: d.pos == 1; color: d.pos == 1 ? accent : foreground; align: end }
-        Text { text: "${d.wins} ${L.wins}"; style: label; color: muted; align: end }
+        Text { text: "${d.wins} 🏆"; style: label; color: muted; align: end }
       }
     }
   }
@@ -216,7 +219,7 @@ widget "f1" {
           weight: 1
           gap: 6
           for d in drivers key d.code {
-            DriverRow { d: d }
+            DriverRow { d: d; teamsNow: latestTeams }
           }
         }
       } else {
